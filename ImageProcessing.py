@@ -66,26 +66,28 @@ class TerrainDataset(Dataset):
                     index = random.randrange(len(self))
                     continue
 
-            # Normalize elevations
-            minimum = heights.min()
-            maximum = heights.max()
-
-            heights = (heights - minimum) / max(
-                maximum - minimum, 1e-6
-            )
-
-            # HR tensor
+            # HR tensor (raw elevations)
             hr = torch.from_numpy(
                 heights.copy()
             ).unsqueeze(0)
 
-            # LR tensor
+            # LR tensor (raw elevations)
             lr = F.interpolate(
                 hr.unsqueeze(0),
                 size=(size // 2, size // 2),
                 mode="bicubic",
                 align_corners=False
             ).squeeze(0)
+
+            # Calculate normalization parameters from LR
+            minimum = lr.min()
+            maximum = lr.max()
+
+            elevation_range = (maximum - minimum).clamp(min=1e-6)
+
+            # Normalize both tensors using LR statistics
+            lr = (lr - minimum) / elevation_range
+            hr = (hr - minimum) / elevation_range
 
             return lr, hr
 

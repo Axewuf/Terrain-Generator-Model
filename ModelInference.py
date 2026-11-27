@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +23,9 @@ INPUT_PATH = (
 
 OUTPUT_DIR = ROOT / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+EXPORT_DIR = OUTPUT_DIR / "export"
+EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 HR_SIZE = 256
 SCALE_FACTOR = 2
@@ -56,6 +58,9 @@ model.eval()
 # Read original 256x256 elevation patch
 with rasterio.open(INPUT_PATH) as src:
 
+    if src.width < HR_SIZE or src.height < HR_SIZE:
+        raise ValueError("DEM is smaller than the requested patch.")
+
     x = (src.width - HR_SIZE) // 2
     y = (src.height - HR_SIZE) // 2
 
@@ -83,23 +88,9 @@ with rasterio.open(INPUT_PATH) as src:
     profile = src.profile.copy()
 
 
-# Normalize elevations
-minimum = original.min()
-maximum = original.max()
-
-elevation_range = max(
-    maximum - minimum,
-    1e-6
-)
-
-normalized = (
-    original - minimum
-) / elevation_range
-
-
-# Convert original to tensor
+# Convert original to tensor (raw elevations)
 hr_tensor = torch.from_numpy(
-    normalized.copy()
+    original.copy()
 ).unsqueeze(0).unsqueeze(0)
 
 
@@ -112,23 +103,36 @@ lr_tensor = F.interpolate(
 )
 
 
+# Preserve raw LR elevations
+lr = lr_tensor.squeeze().numpy().copy()
+
+
+# Calculate normalization parameters from LR
+minimum = lr_tensor.min()
+maximum = lr_tensor.max()
+
+elevation_range = (maximum - minimum).clamp(min=1e-6)
+
+
+# Normalize LR tensor
+lr_normalized = (
+    lr_tensor - minimum
+) / elevation_range
+
+
 # Run super-resolution
-with torch.no_grad():
+with torch.inference_mode():
 
     prediction = model(
-        lr_tensor.to(device)
+        lr_normalized.to(device)
     )
 
 
-# Convert tensors back to elevation values
-lr = (
-    lr_tensor.squeeze().numpy()
-    * elevation_range + minimum
-).astype(np.float32)
-
+# Denormalize prediction to actual elevation values
 sr = (
     prediction.squeeze().cpu().numpy()
-    * elevation_range + minimum
+    * elevation_range.item()
+    + minimum.item()
 ).astype(np.float32)
 
 
@@ -183,7 +187,42 @@ save_geotiff(
 )
 
 
-print("Saved:")
+# Export raw Float32 binary files (little-endian)
+original.astype("<f4", copy=False).tofile(
+    EXPORT_DIR / "Terrain_Original_256.bin"
+)
+
+lr.astype("<f4", copy=False).tofile(
+    EXPORT_DIR / "Terrain_Input_128.bin"
+)
+
+sr.astype("<f4", copy=False).tofile(
+    EXPORT_DIR / "Terrain_SR_256.bin"
+)
+
+
+# Print elevation statistics
+print("\nElevation statistics:")
+
+for name, data in [
+    ("Original HR", original),
+    ("Input LR", lr),
+    ("Output SR", sr)
+]:
+    print(f"\n{name}:")
+    print(f" - Shape: {data.shape}")
+    print(f" - Data type: {data.dtype}")
+    print(f" - Minimum: {data.min():.4f} m")
+    print(f" - Maximum: {data.max():.4f} m")
+    print(f" - Mean: {data.mean():.4f} m")
+    print(f" - Std: {data.std():.4f} m")
+
+
+# Print saved files
+print("\nSaved:")
 print(" - Terrain_Original_256.tif")
 print(" - Terrain_Input_128.tif")
 print(" - Terrain_SR_256.tif")
+print(" - export/Terrain_Original_256.bin")
+print(" - export/Terrain_Input_128.bin")
+print(" - export/Terrain_SR_256.bin")
